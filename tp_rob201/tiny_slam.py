@@ -1,5 +1,7 @@
 """ A simple robotics navigation code including SLAM, exploration, planning"""
 
+import time
+
 import cv2
 import numpy as np
 from occupancy_grid import OccupancyGrid
@@ -57,6 +59,15 @@ class TinySlam:
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
         """
+        
+        
+        
+        # x_real     = []
+        # y_real     = []
+        # theta_real = []  
+        print("Updating map with pose:", pose)
+        
+        time.sleep(1.5)
         # TODO for TP3
 
     def compute(self):
@@ -67,8 +78,9 @@ class TinySlam:
         ray_angles = np.arange(-np.pi, np.pi, np.pi / 1800)
 
         # Poor implementation of polar to cartesian conversion
-        points = []
-        for i in range(3600):
-            pt_x = ranges[i] * np.cos(ray_angles[i])
-            pt_y = ranges[i] * np.sin(ray_angles[i])
-            points.append([pt_x, pt_y])
+        # points = []
+        # for i in range(3600):
+        #     pt_x = ranges[i] * np.cos(ray_angles[i])
+        #     pt_y = ranges[i] * np.sin(ray_angles[i])
+        #     points.append([pt_x, pt_y])
+

@@ -11,7 +11,7 @@ from worlds.my_world import MyWorld
 if __name__ == '__main__':
     lidar_params = LidarParams()
     lidar_params.noise_enable = True
-    # lidar_params.fov = 360
+    lidar_params.fov = 360
     # lidar_params.resolution = 361
     # lidar_params.max_range = 600
     # lidar_params.std_dev_noise = 2.5
