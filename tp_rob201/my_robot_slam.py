@@ -26,8 +26,6 @@ class MyRobotSlam(RobotAbstract):
         super().__init__(lidar_params=lidar_params,
                          odometer_params=odometer_params)
 
-        # step counter to deal with init and display
-        self.counter = 0
 
         # Init SLAM object
         # Here we cheat to get an occupancy grid size that's not too large, by using the
@@ -50,7 +48,15 @@ class MyRobotSlam(RobotAbstract):
         """
         Main control function executed at each time step
         """
-        return self.control_tp1()
+        #For TP1:
+        # return self.control_tp1()
+        
+        #For TP3:
+        self.tiny_slam.localise(self.lidar(), self.odometer_values())
+        return self.control_tp3()
+    
+    def slam_compute(self):
+        self.tiny_slam.compute()
 
     def control_tp1(self):
         """
@@ -63,15 +69,59 @@ class MyRobotSlam(RobotAbstract):
         command = reactive_obst_avoid(self.lidar())
         return command
 
+    def control_tp3(self):
+        """
+        Control function for TP3
+        Main control function with full SLAM, random exploration and path planning
+        """
+        
+        
+        pose = self.odometer_values()
+        
+        
+        # 1. Compute new command speed to perform obstacle avoidance
+        command = self.control_tp1()
+        
+        # 2. Update odometry reference by scan-matching, then compute corrected pose
+        self.tiny_slam.localise(self.lidar(), pose)
+        self.corrected_pose = self.tiny_slam.get_corrected_pose(pose)
+
+        # 3. Update map with corrected pose
+        self.tiny_slam.update_map(self.lidar(), self.corrected_pose)
+        
+    
+        
+        return command
+    
+    
+    
+
     def control_tp2(self):
         """
         Control function for TP2
         Main control function with full SLAM, random exploration and path planning
         """
+        
         pose = self.odometer_values()
-        goal = [0,0,0]
+
+        # Update odometry reference by scan-matching, then compute corrected pose
+        self.tiny_slam.localise(self.lidar(), pose)
+        self.corrected_pose = self.tiny_slam.get_corrected_pose(pose)
+        
+        
+        
+        goal = -1. * np.array([100,100])
+    
 
         # Compute new command speed to perform obstacle avoidance
-        command = potential_field_control(self.lidar(), pose, goal)
-
-        return command
+        potential_command = potential_field_control(self.lidar(), pose, goal)
+        
+        # reactive_command = reactive_obst_avoid(self.lidar())
+        
+        
+        #TODO: fuse the two commands by weighted averaging 
+        # fusing to avoid obstacles while going to goal
+        
+        #Debug prints)
+        
+        return potential_command
