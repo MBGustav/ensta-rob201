@@ -162,6 +162,9 @@ def potential_field_control(lidar, current_pose, goal_pose):
     # POSE
     # =========================
     x, y, theta = current_pose
+    if goal_pose is None:
+        return {"forward": 0.0, "rotation": 0.0}
+    
     gx, gy, _ = goal_pose
 
     dx = gx - x

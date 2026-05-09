@@ -265,11 +265,13 @@ class TinySlam:
             points.append([pt_x, pt_y])
         return np.array(points).T
 
-    def update_map(self, lidar, pose):
+    def update_map(self, lidar, pose, goal=None, trajectory=None):
         """
         Bayesian map update with new observation
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
+        goal : [x, y, theta] nparray, current goal in world coordinates
+        trajectory : list of [x, y, theta] nparray, robot trajectory in world coordinates
         """
         x_ref, y_ref, theta_ref = np.asarray(pose, dtype=float)
         
@@ -321,7 +323,7 @@ class TinySlam:
         np.clip(self.grid.occupancy_map, -40, 40, out=self.grid.occupancy_map) # Clip values to [0, 100]
     
         # 4. plot for debug
-        self.grid.display_cv(pose)
+        self.grid.display_cv(pose, goal=goal, traj=trajectory)
     
 
 

@@ -45,9 +45,17 @@ class MyRobotSlam(RobotAbstract):
                                             y_max=size_area[1] / 2 - robot_position[1],
                                             resolution=2)
 
-
+        # ================================ 
         # Path planner
+        # ================================  
         self.planner = Planner(self.occupancy_grid)
+
+        # storage for pose after localization
+        self.use_planning_path = True
+        self.corrected_pose = np.array([0, 0, 0])
+        self.localisation_score_threshold = 5.0
+        self.localisation_warmup_steps = 80
+        
         
         self.tiny_slam = TinySlam(self.occupancy_grid)
 
@@ -78,6 +86,7 @@ class MyRobotSlam(RobotAbstract):
         # self.planner.A_start(np.array([0, 0, 0]), self.goals_list[-1])
         # self.goal_planner = goals_list[-1]
     def get_curr_goal(self):
+    
         if self.curr_goal_idx < len(self.goals_list):
             return self.goals_list[self.curr_goal_idx]
         else:
@@ -130,3 +139,64 @@ class MyRobotSlam(RobotAbstract):
 
         # Compute new command speed to perform obstacle avoidance
         return command
+
+    def control_tp5(self):
+        """
+        Simplified TP5:
+        - SLAM (safe localization)
+        - Map update
+        - Goal selection
+        - Potential field control
+        """
+
+        self.tiny_slam.compute()
+
+        pose = self.odometer_values()
+        self.corrected_pose = pose  # fallback
+
+        # -------------------------
+        # LOCALISATION (safe)
+        # -------------------------
+        if self.counter >= self.localisation_warmup_steps:
+            try:
+                score = self.tiny_slam.localise(self.lidar(), pose)
+
+                if score > self.localisation_score_threshold:
+                    self.corrected_pose = self.tiny_slam.get_corrected_pose(pose)
+
+            except Exception as e:
+                print("SLAM error:", e)
+
+        # -------------------------
+        # GOAL SELECTION
+        # -------------------------
+        self.curr_goal = self.get_curr_goal()
+        
+        # -------------------------
+        # MAP UPDATE
+        # -------------------------
+        try:
+            self.tiny_slam.update_map(self.lidar(), self.corrected_pose, goal=self.curr_goal, trajectory=None)
+        except Exception as e:
+            print("Map update error:", e)
+
+
+        # -------------------------
+        # CONTROL (POTENTIAL FIELD)
+        # -------------------------
+        if self.curr_goal is None:
+            return {"forward": 0.0, "rotation": 0.0}
+
+        try:
+            command = potential_field_control(
+                lidar=self.lidar(),
+                current_pose=self.corrected_pose,
+                goal_pose=self.curr_goal
+            )
+        except Exception as e:
+            print("Control error:", e)
+            command = {"forward": 0.0, "rotation": 0.0}
+
+        return command
+                
+            
