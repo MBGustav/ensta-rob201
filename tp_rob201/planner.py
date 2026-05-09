@@ -3,6 +3,10 @@ Planner class
 Implementation of A*
 """
 
+import math
+import heapq
+from collections import defaultdict
+import cv2
 import numpy as np
 
 from occupancy_grid import OccupancyGrid
@@ -43,16 +47,48 @@ class Planner:
         goal : [x, y, theta] nparray, goal pose in world coordinates (theta unused)
         mu : float, weight of the heuristic function (weighted A*)
         """
-        # Threshold and dilate map to avoid obstacles
-        # Utilizamos um kernel maior (ex: 15x15) para dilatar mais as paredes.
-        # Assim, o caminho gerado passa bem longe dos obstáculos e evita que o robô esbarre na volta.
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        # Threshold map without dilation to allow passage through narrow doorways
+        # Using 1x1 kernel (essentially no dilation) - let potential field handle wall avoidance
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
         self.map_walls = cv2.filter2D((self.grid.occupancy_map > 0).astype(np.float32), -1, kernel)
 
         start_cell = self.grid.conv_world_to_map(start[0], start[1])
         goal_cell = self.grid.conv_world_to_map(goal[0], goal[1])
         start_cell = (int(start_cell[0]), int(start_cell[1]))
         goal_cell = (int(goal_cell[0]), int(goal_cell[1]))
+
+        # Validate start and goal cells are within bounds
+        if not (0 <= start_cell[0] < self.grid.x_max_map and 0 <= start_cell[1] < self.grid.y_max_map):
+            print(f"ERROR: Start cell {start_cell} out of bounds")
+            return []
+        
+        if not (0 <= goal_cell[0] < self.grid.x_max_map and 0 <= goal_cell[1] < self.grid.y_max_map):
+            print(f"ERROR: Goal cell {goal_cell} out of bounds")
+            return []
+
+        # Check if goal is in obstacle (blocked)
+        if self.map_walls[int(goal_cell[0]), int(goal_cell[1])] > 0.5:
+            print(f"WARNING: Goal cell {goal_cell} is in obstacle, adjusting...")
+            # Try to find nearby free cell
+            found_free = False
+            for radius in range(1, 20):
+                for dx in range(-radius, radius+1):
+                    for dy in range(-radius, radius+1):
+                        nx, ny = goal_cell[0] + dx, goal_cell[1] + dy
+                        if (0 <= nx < self.grid.x_max_map and 0 <= ny < self.grid.y_max_map and
+                            self.map_walls[int(nx), int(ny)] < 0.5):
+                            goal_cell = (int(nx), int(ny))
+                            found_free = True
+                            print(f"Adjusted goal to nearby free cell: {goal_cell}")
+                            break
+                    if found_free:
+                        break
+                if found_free:
+                    break
+            
+            if not found_free:
+                print(f"ERROR: Cannot find free cell near goal")
+                return []
 
         openSet = []
         heapq.heappush(openSet, (0.0, start_cell))
@@ -84,6 +120,7 @@ class Planner:
                 for cell in path_cells:
                     xw, yw = self.grid.conv_map_to_world(cell[0], cell[1])
                     path_world.append([xw, yw, 0.0])
+                print(f"Path found with {len(path_world)} waypoints")
                 return path_world
 
             for neighbor in self.get_neighbors(current):
@@ -99,8 +136,8 @@ class Planner:
                         openSet_hash.add(neighbor)
                         heapq.heappush(openSet, (fScore[neighbor], neighbor))
 
-        path = [start, goal]  # fallback
-        return path
+        print(f"ERROR: No path found from {start_cell} to {goal_cell}")
+        return []  # Return empty path instead of invalid fallback
 
     def explore_frontiers(self, current_pose):
         grid = self.grid.occupancy_map
@@ -117,15 +154,39 @@ class Planner:
         points = np.column_stack(np.where(frontiers))
 
         if len(points) == 0:
+            print(f"DEBUG: No frontier points found")
             return np.array([0., 0., 0.])
 
         # 3. Robot position in map frame
         rx, ry = self.grid.conv_world_to_map(current_pose[0], current_pose[1])
         robot = np.array([rx, ry])
 
-        # 4. Pick nearest frontier
-        dists = np.linalg.norm(points - robot, axis=1)
-        best = points[np.argmin(dists)]
+        # 4. Filter frontier points - relax constraints for better exploration
+        valid_frontiers = []
+        for point in points:
+            dist = np.linalg.norm(point - robot)
+            # Looser distance constraint: 5 to 800 units
+            # Don't check if in free space - frontier detection already ensures border between free/unknown
+            if 5 < dist < 800:
+                valid_frontiers.append(point)
+        
+        if len(valid_frontiers) == 0:
+            print(f"DEBUG: No valid frontiers within distance range. Total points: {len(points)}")
+            if len(points) > 0:
+                # If we have points but none pass filters, just take closest anyway
+                dists = np.linalg.norm(points - robot, axis=1)
+                best_idx = np.argmin(dists)
+                best = points[best_idx]
+                print(f"DEBUG: Taking closest point anyway at distance {dists[best_idx]:.1f}")
+            else:
+                return np.array([0., 0., 0.])
+        else:
+            # Pick nearest valid frontier
+            valid_frontiers = np.array(valid_frontiers)
+            dists = np.linalg.norm(valid_frontiers - robot, axis=1)
+            best_idx = np.argmin(dists)
+            best = valid_frontiers[best_idx]
+            print(f"DEBUG: Found {len(valid_frontiers)} valid frontiers, closest at distance {dists[best_idx]:.1f}")
 
         # 5. Convert back to world
         xw, yw = self.grid.conv_map_to_world(best[0], best[1])
