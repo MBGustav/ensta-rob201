@@ -20,7 +20,9 @@ class Planner:
 
         # Origin of the odom frame in the map frame
         self.odom_pose_ref = np.array([0, 0, 0])
-
+        self.visited_frontiers = []
+        self.frontier_revisit_distance = 60.0  # Minimum distance to consider a frontier as "new" (increased to encourage exploration of new areas)
+    
     def get_neighbors(self, current_cell):
         """ 8-connected neighbors """
         x, y = current_cell
@@ -47,11 +49,16 @@ class Planner:
         goal : [x, y, theta] nparray, goal pose in world coordinates (theta unused)
         mu : float, weight of the heuristic function (weighted A*)
         """
-        # Threshold map without dilation to allow passage through narrow doorways
-        # Using 1x1 kernel (essentially no dilation) - let potential field handle wall avoidance
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
-        self.map_walls = cv2.filter2D((self.grid.occupancy_map > 0).astype(np.float32), -1, kernel)
-
+        # Threshold map with dilation (inflation) to avoid planning muito perto das paredes
+        occ_threshold = 5  # Ajuste conforme necessário
+        inflation_kernel_size = 25  # Ajuste conforme o tamanho do robô
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflation_kernel_size, inflation_kernel_size))
+        occ_map_bin = (self.grid.occupancy_map > occ_threshold).astype(np.uint8)
+        self.map_walls = cv2.dilate(occ_map_bin, kernel)
+        
+        # save inflated walls for debug
+        cv2.imwrite("inflated_walls.png", self.map_walls * 255)
+        
         start_cell = self.grid.conv_world_to_map(start[0], start[1])
         goal_cell = self.grid.conv_world_to_map(goal[0], goal[1])
         start_cell = (int(start_cell[0]), int(start_cell[1]))
@@ -146,7 +153,7 @@ class Planner:
         free = grid < -0.01
         unknown = (grid >= -0.01) & (grid <= 0.1)
 
-        # 2. Frontier = unknown next to free
+        # 2. Frontier detection
         kernel = np.ones((3, 3), np.uint8)
         free_dilated = cv2.dilate(free.astype(np.uint8), kernel)
         frontiers = unknown & (free_dilated > 0)
@@ -154,40 +161,60 @@ class Planner:
         points = np.column_stack(np.where(frontiers))
 
         if len(points) == 0:
-            print(f"DEBUG: No frontier points found")
+            print("DEBUG: No frontier points found")
             return np.array([0., 0., 0.])
 
-        # 3. Robot position in map frame
+        # 3. Robot position
         rx, ry = self.grid.conv_world_to_map(current_pose[0], current_pose[1])
         robot = np.array([rx, ry])
 
-        # 4. Filter frontier points - relax constraints for better exploration
+        # =========================
+        # MEMORY FILTER (NEW)
+        # =========================
+        def is_too_close_to_visited(p):
+            for vp in self.visited_frontiers:
+                if np.linalg.norm(p - vp) < self.frontier_revisit_distance:
+                    return True
+            return False
+
+        # 4. Filter frontiers
         valid_frontiers = []
+
         for point in points:
             dist = np.linalg.norm(point - robot)
-            # Looser distance constraint: 5 to 800 units
-            # Don't check if in free space - frontier detection already ensures border between free/unknown
-            if 5 < dist < 800:
-                valid_frontiers.append(point)
-        
-        if len(valid_frontiers) == 0:
-            print(f"DEBUG: No valid frontiers within distance range. Total points: {len(points)}")
-            if len(points) > 0:
-                # If we have points but none pass filters, just take closest anyway
-                dists = np.linalg.norm(points - robot, axis=1)
-                best_idx = np.argmin(dists)
-                best = points[best_idx]
-                print(f"DEBUG: Taking closest point anyway at distance {dists[best_idx]:.1f}")
-            else:
-                return np.array([0., 0., 0.])
-        else:
-            # Pick nearest valid frontier
-            valid_frontiers = np.array(valid_frontiers)
-            dists = np.linalg.norm(valid_frontiers - robot, axis=1)
-            best_idx = np.argmin(dists)
-            best = valid_frontiers[best_idx]
-            print(f"DEBUG: Found {len(valid_frontiers)} valid frontiers, closest at distance {dists[best_idx]:.1f}")
 
-        # 5. Convert back to world
+            if dist < 5 or dist > 800:
+                continue
+
+            if is_too_close_to_visited(point):
+                continue
+
+            valid_frontiers.append(point)
+
+        # fallback si tout est filtré
+        if len(valid_frontiers) == 0:
+            print("DEBUG: No new frontiers, relaxing memory filter")
+
+            # fallback: autorise anciens frontiers mais pénalise
+            valid_frontiers = points
+
+        valid_frontiers = np.array(valid_frontiers)
+
+        dists = np.linalg.norm(valid_frontiers - robot, axis=1)
+        best_idx = np.argmin(dists)
+        best = valid_frontiers[best_idx]
+
+        # =========================
+        # STORE VISITED FRONTIER
+        # =========================
+        self.visited_frontiers.append(best)
+
+        # limite mémoire (évite explosion RAM)
+        if len(self.visited_frontiers) > 500:
+            self.visited_frontiers = self.visited_frontiers[-500:]
+
         xw, yw = self.grid.conv_map_to_world(best[0], best[1])
+
+        print(f"DEBUG: selected frontier at dist {dists[best_idx]:.1f}")
+
         return np.array([xw, yw, 0.0])

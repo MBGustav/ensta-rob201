@@ -10,11 +10,12 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     current_pose : [x, y, theta] current robot pose
     path : list of [x, y, theta] waypoints
     lidar_weight : balance between path following (0.7) and obstacle avoidance (0.3)
-    
-    Returns command dict with forward and rotation
     """
     if path is None or len(path) == 0:
         return {"forward": 0.0, "rotation": 0.0}
+    
+    speed_factor = 0.6
+
     
     x, y, theta = current_pose
     c = np.cos(theta)
@@ -25,7 +26,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     closest_idx = int(np.argmin(dists))
     
     # Lookahead distance - find target ahead on path
-    lookahead_dist = 40.0
+    lookahead_dist = 20.0
     target = path[-1]
     for i in range(closest_idx, len(path)):
         if np.linalg.norm(current_pose[:2] - np.array(path[i][:2])) >= lookahead_dist:
@@ -48,7 +49,8 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
         return {"forward": 0.0, "rotation": 0.0}
     
     # Strong attraction to path
-    k_path = 1200.0
+    k_path = 1500.0
+    k_lateral = 500.0
     F_path_x = k_path * dx_r
     F_path_y = k_path * dy_r
     
@@ -77,7 +79,6 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
             lateral_dist = -rel_x * path_dy + rel_y * path_dx
             
             # Lateral correction force (strong to keep on path)
-            k_lateral = 800.0
             F_lateral = k_lateral * lateral_dist * path_dy  # force perpendicular to path
             F_lateral_x = -F_lateral * path_dy
             F_lateral_y = F_lateral * path_dx
@@ -100,8 +101,8 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     F_rep_x = 0.0
     F_rep_y = 0.0
     
-    dist_param = 40.0
-    k_rep = 80.0
+    dist_param = 20.0
+    k_rep = 60.0
     safety_dist = 8.0
     
     for d, a in zip(laser, angles):
@@ -134,7 +135,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     forward_cmd = alignment * np.tanh(force_mag / 2000.0)
     
     return {
-        "forward": float(np.clip(forward_cmd * 0.85, 0.0, 1.0)),
+        "forward":  float(np.clip(forward_cmd *speed_factor, 0.0, 1.0)),
         "rotation": float(np.clip(rotation_cmd * 2.0, -1.0, 1.0))
     }
 
@@ -146,85 +147,114 @@ def reactive_obst_avoid(lidar):
     """
     # TODO for TP1    
     return avoidance_method_TP1(lidar)
+import numpy as np
 
 
 def avoidance_method_TP1(lidar):
     """
-    Otimized obstacle avoidance for door passage
-    lidar : placebot object with lidar data
+    Reactive exploration + door finding
     """
+    speed_factor = 0.6
+    rotation_factor = 1.0
 
-    # ====== OPTIMIZED PARAMETERS FOR DOOR PASSAGE ======
-    # Default speeds
-    speed_factor = 0.8              # velocidade para frente (aumentado)
-    rotation_speed = 0              # sem rotação inicialmente
-    
     # Lidar readings
     laser_dist = np.array(lidar.get_sensor_values())
-    
-    # ====== EXPANDED FOV FOR BETTER DOOR DETECTION ======
-    main_direction = 180
-    threshold_angle = 110            # Expanded from 80 to 110 for wider view
-    # FOV angles 
-    fov_angles = np.arange(main_direction - threshold_angle, main_direction + threshold_angle)
-    
-    # Filtrar leituras dentro do FOV
-    laser_dist_fov = laser_dist[fov_angles]
-    
-    # Distâncias mínimas e máximas
-    max_dist = np.max(laser_dist_fov)
-    min_dist = np.min(laser_dist_fov)
-    max_index = np.argmax(laser_dist_fov)
-    
-    # ====== REDUCED SAFE DISTANCE FOR NARROW SPACES ======
-    safe_distance = 18              # Reduced from 30/10 to allow passage through doors
-    critical_distance = 12           # Emergency stop distance
-    
-    
-    # --- Optimized obstacle avoidance logic ---
-    if min_dist < critical_distance:
-        # Emergency: obstacle very close
-        rotation_speed = 60          # gira rapidamente para evitar
-        speed = 0                    # para de avançar
-    elif min_dist < safe_distance:
-        # Obstacle close: turn toward open space
-        open_space_center = fov_angles[max_index]
-        center_fov = main_direction
-        turn_direction = open_space_center - center_fov
-        
-        # Adaptive rotation based on opening location
-        if turn_direction > 0:
-            rotation_speed = -20     # Turn left (negative rotation)
+
+    # Forward field of view
+    center = 180
+    fov = 100
+
+    angles = np.arange(center - fov, center + fov)
+    scan = laser_dist[angles]
+
+    # Parameters
+    safe_distance = 25
+    free_threshold = 40
+
+    # Default motion
+    speed = 0.5
+    rotation = 0.0
+
+    # -----------------------------------
+    # 1. Emergency obstacle avoidance
+    # -----------------------------------
+    front_zone = scan[fov-20:fov+20]
+
+    if np.min(front_zone) < safe_distance:
+
+        # Compare left/right clearance
+        left_clearance = np.mean(scan[:fov])
+        right_clearance = np.mean(scan[fov:])
+
+        speed = 0
+
+        if left_clearance > right_clearance:
+            rotation = -1.0
         else:
-            rotation_speed = 20      # Turn right (positive rotation)
-        speed = 20                   # Move forward slowly while turning
-    elif max_dist > safe_distance * 1.5:
-        # Clear path: advance forward
-        speed = 60                   # avança para frente
-        rotation_speed = 0           # sem rotação
+            rotation = 1.0
+
     else:
-        # Intermediate: gentle adjustment toward best opening
-        if max_index < len(laser_dist_fov) / 2:
-            rotation_speed = -8      # Slight left
+
+        # -----------------------------------
+        # 2. Detect free gaps (doors)
+        # -----------------------------------
+        free_space = scan > free_threshold
+
+        segments = []
+        start = None
+
+        for i, val in enumerate(free_space):
+
+            if val and start is None:
+                start = i
+
+            elif not val and start is not None:
+                segments.append((start, i))
+                start = None
+
+        if start is not None:
+            segments.append((start, len(free_space)))
+
+        # -----------------------------------
+        # 3. Choose best opening
+        # -----------------------------------
+        if segments:
+
+            # Prefer widest opening
+            widths = [end-start for start, end in segments]
+            best_idx = np.argmax(widths)
+
+            start, end = segments[best_idx]
+
+            target = (start + end) / 2
+
+            error = target - len(scan)/2
+
+            # Steering toward opening
+            rotation = error / (len(scan)/2)
+
+            # Larger opening = faster motion
+            speed = 0.8
+
         else:
-            rotation_speed = 8       # Slight right
-        speed = 35                   # avança moderadamente    
-    
-    
-    # Normalize commands to controller ranges:
-    # - forward in [0.0, 1.0]
-    # - rotation in [-1.0, 1.0]
-    forward = np.clip(speed / 60.0, 0.0, 1.0)
-    rotation = np.clip(rotation_speed / 60.0, -1.0, 1.0)
 
-    command = {"forward": float(forward), "rotation": float(rotation)}
-    
-    # Debug prints (uncomment to debug)
-    # print(f"FOV max dist: {max_dist:.1f}, min dist: {min_dist:.1f}, cmd: F={forward:.2f} R={rotation:.2f}")
-    
-    return command
+            # No opening → wall following
+            left_mean = np.mean(scan[:fov])
+            right_mean = np.mean(scan[fov:])
 
+            if left_mean > right_mean:
+                rotation = -0.5
+            else:
+                rotation = 0.5
 
+            speed = 0.3
+
+    return {
+        "forward": speed * speed_factor,
+        "rotation": rotation * rotation_factor
+    }
+    
+    
 def potential_field_control(lidar, current_pose, goal_pose):
 
     # =========================

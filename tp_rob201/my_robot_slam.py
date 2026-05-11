@@ -94,16 +94,11 @@ class MyRobotSlam(RobotAbstract):
 
         return command
 
-    def control_tp5(self):
+    def step_location(self, pose):
         """
-        Control function for TP5: Frontier exploration with path planning
-        - SLAM with localization
-        - Frontier-based exploration
-        - A* path planning
-        - Path following with lookahead
+        Step function for localization only, to test the localization part of the SLAM
         """
-        pose = self.odometer_values()
-
+        
         # Always try localization
         try:
             localisation_score = self.tiny_slam.localise(self.lidar(), pose)
@@ -121,25 +116,15 @@ class MyRobotSlam(RobotAbstract):
         except Exception as e:
             print("Mapping error:", e)
 
-        # Initialize exploration state on first run
-        if getattr(self, 'exploration_state', None) is None:
-            self.exploration_state = 'explore'
-            self.current_goal = np.array([0., 0., 0.])
-            self.planned_path = None
-            self.force_replan = True
-            self.ticks_failed = 0
-
-        # Warmup phase: build initial map
-        if self.counter < 100:
-            command = reactive_obst_avoid(self.lidar())
-            if self.counter % 5 == 0:
-                try:
-                    self.occupancy_grid.display_cv(self.corrected_pose)
-                except:
-                    pass
-            self.counter += 1
-            return command
-
+    def force_replan(self):
+        """
+        Force replanning at next step, for example in case of localization failure or stuck robot
+        """
+        
+    def step_replanning(self):
+        """
+        Step function for testing the planner only, with a fixed goal and perfect localization
+        """
         # Replan when necessary: no path, force replan, or periodically
         if self.planned_path is None or self.force_replan or self.counter % 300 == 0:
             if self.exploration_state == 'explore':
@@ -148,7 +133,7 @@ class MyRobotSlam(RobotAbstract):
                 # If no frontier found, switch to return state
                 # Only mark exploration done if frontier is truly [0,0,0] or very close
                 frontier_dist = np.linalg.norm(self.current_goal[:2])
-                if frontier_dist < 1.0:
+                if frontier_dist < 6.0:
                     print("No more reachable frontiers! Exploration finished.")
                     self.exploration_state = 'return'
                     self.current_goal = np.array([0., 0., 0.])
@@ -162,10 +147,30 @@ class MyRobotSlam(RobotAbstract):
                 print(f"Planning error: {e}")
                 self.planned_path = None
             self.force_replan = False
+    
+    def step_warmup(self):
         
-        # =============
-        # Execute plan
-        # =============
+        # Warmup phase: build initial map
+        if self.counter < 100:
+            command = reactive_obst_avoid(self.lidar())
+            if self.counter % 5 == 0:
+                try:
+                    self.occupancy_grid.display_cv(self.corrected_pose)
+                except:
+                    pass
+            self.counter += 1
+            return command
+    
+    def step_state(self):
+        # Initialize exploration state on first run
+        if getattr(self, 'exploration_state', None) is None:
+            self.exploration_state = 'explore'
+            self.current_goal = np.array([0., 0., 0.])
+            self.planned_path = None
+            self.force_replan = True
+            self.ticks_failed = 0
+
+    def step_execute_plan(self):
         if self.planned_path is not None and len(self.planned_path) > 0:
             dist_to_goal = np.linalg.norm(self.corrected_pose[:2] - self.current_goal[:2])
             
@@ -202,8 +207,11 @@ class MyRobotSlam(RobotAbstract):
             # No valid path, fallback to obstacle avoidance
             command = reactive_obst_avoid(self.lidar())
             self.force_replan = True
-
-        # Display trajectory
+        
+        return command
+    
+    
+    def step_display(self):
         if self.counter % 5 == 0:
             try:
                 if self.planned_path is not None and len(self.planned_path) > 0:
@@ -214,6 +222,30 @@ class MyRobotSlam(RobotAbstract):
             except Exception as e:
                 print(f"Display error: {e}")
 
+
+    
+    def control_tp5(self):
+        """
+        Control function for TP5: Frontier exploration with path planning
+        - SLAM with localization
+        - Frontier-based exploration
+        - A* path planning
+        - Path following with lookahead
+        """
+        pose = self.odometer_values()
+        
+        self.step_location(pose)  # Update localization and map
+                
+        self.step_state()  # Initialize state if first run
+        
+        self.step_replanning()  # Replan path if needed
+
+        self.step_warmup()
+        
+        command = self.step_execute_plan()
+        
+        self.step_display()
+    
         self.counter += 1
         return command
                 

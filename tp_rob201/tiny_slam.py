@@ -32,9 +32,9 @@ class TinySlam:
         # ===================
         self.cem_population  = 40    # era 20 — cobertura do espaço
         self.cem_iterations  = 15    # era 10 — tempo para convergir
-        self.cem_elite_frac  = 0.25  # era 0.3 → nro. elites (mais seletivo)
-        self.cem_alpha       = 0.7   # era 0.4 — converge mais rápido para elites
-        self.cem_min_std     = np.array([0.1, 0.1, 0.005], dtype=float)
+        self.cem_elite_frac  = 0.15  # era 0.3 → nro. elites (mais seletivo)
+        self.cem_alpha       = 0.8   # era 0.4 — converge mais rápido para elites
+        self.cem_min_std     = np.array([5.0, 5.0, 0.008], dtype=float)
 
         # Permite correções maiores
         self.max_ref_update  = np.array([40.0, 40.0, 0.5], dtype=float)  # era [25, 25, 0.35]
