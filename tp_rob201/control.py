@@ -14,7 +14,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     if path is None or len(path) == 0:
         return {"forward": 0.0, "rotation": 0.0}
     
-    speed_factor = 0.6
+    speed_factor = 0.8
 
     
     x, y, theta = current_pose
@@ -26,7 +26,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     closest_idx = int(np.argmin(dists))
     
     # Lookahead distance - find target ahead on path
-    lookahead_dist = 20.0
+    lookahead_dist = 15.0
     target = path[-1]
     for i in range(closest_idx, len(path)):
         if np.linalg.norm(current_pose[:2] - np.array(path[i][:2])) >= lookahead_dist:
@@ -49,7 +49,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
         return {"forward": 0.0, "rotation": 0.0}
     
     # Strong attraction to path
-    k_path = 1500.0
+    k_path = 900.0
     k_lateral = 500.0
     F_path_x = k_path * dx_r
     F_path_y = k_path * dy_r
@@ -102,7 +102,7 @@ def path_following_control(lidar, current_pose, path, lidar_weight=0.3):
     F_rep_y = 0.0
     
     dist_param = 20.0
-    k_rep = 60.0
+    k_rep = 30.0
     safety_dist = 8.0
     
     for d, a in zip(laser, angles):

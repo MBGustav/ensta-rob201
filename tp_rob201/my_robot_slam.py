@@ -54,6 +54,14 @@ class MyRobotSlam(RobotAbstract):
         self.planned_path = None
         self.force_replan = True
         self.ticks_failed = 0
+        
+        self.consecutive_path_failures = 0
+        self.max_path_failures = 5
+        
+        self.last_dist_to_goal = np.inf
+        self.no_progress_ticks = 0
+        self.max_no_progress_ticks = 100
+        
     def control(self):
         """
         Main control function executed at each time step
@@ -100,6 +108,26 @@ class MyRobotSlam(RobotAbstract):
 
         return command
 
+    def step_check_progress(self):
+        """Força replan se o robô não está progredindo em direção ao goal."""
+        if self.planned_path is None or self.exploration_state == "return":
+            return
+
+        dist = np.linalg.norm(self.corrected_pose[:2] - self.current_goal[:2])
+
+        if dist < self.last_dist_to_goal - 5.0:  # progrediu pelo menos 5 unidades
+            self.last_dist_to_goal = dist
+            self.no_progress_ticks = 0
+        else:
+            self.no_progress_ticks += 1
+
+        if self.no_progress_ticks >= self.max_no_progress_ticks:
+            print(f"Sem progresso há {self.max_no_progress_ticks} ticks → novo frontier")
+            self.no_progress_ticks = 0
+            self.last_dist_to_goal = np.inf
+            self.force_replan = True
+            self.planned_path = None
+            
     def step_location(self, pose):
         """
         Step function for localization only, to test the localization part of the SLAM
@@ -159,7 +187,19 @@ class MyRobotSlam(RobotAbstract):
                 self.corrected_pose, self.current_goal, mu=1.0
             )
             if not self.planned_path:
-                self.force_replan = True
+                self.consecutive_path_failures += 1
+                print(f"Falha {self.consecutive_path_failures}/{self.max_path_failures}")
+                
+                if self.consecutive_path_failures >= self.max_path_failures:
+                    print("Muitas falhas → retornando para casa")
+                    self.exploration_state = "return"
+                    self.current_goal = np.array([0., 0., 0.])
+                    self.consecutive_path_failures = 0
+                    self.planned_path = self.planner.plan(
+                        self.corrected_pose, self.current_goal, mu=1.0
+                    )
+                else:
+                    self.force_replan = True
                 return
         except Exception as e:
             print("Erro no planejamento:", e)
@@ -167,6 +207,7 @@ class MyRobotSlam(RobotAbstract):
             self.force_replan = True
             return
 
+        self.consecutive_path_failures = 0  # reset ao encontrar path válido
         self.force_replan = False
 
 
@@ -214,29 +255,43 @@ class MyRobotSlam(RobotAbstract):
             except Exception as e:
                 print(f"Display error: {e}")
 
-    
+    def step_validate_path(self):
+        if self.planned_path is None or len(self.planned_path) == 0:
+            return
+
+        lookahead = min(10, len(self.planned_path))
+        for waypoint in self.planned_path[:lookahead]:
+            cell = self.occupancy_grid.conv_world_to_map(waypoint[0], waypoint[1])
+            cx, cy = int(cell[0]), int(cell[1])
+
+            if not (0 <= cx < self.occupancy_grid.x_max_map and
+                    0 <= cy < self.occupancy_grid.y_max_map):
+                continue
+
+            # Verifica parede inflada
+            if hasattr(self.planner, 'map_walls') and self.planner.map_walls[cx, cy] > 0.5:
+                print("Waypoint em parede inflada → replanando")
+                self.force_replan = True
+                self.planned_path = None
+                return
+
+            # Verifica parede recém descoberta no mapa bruto
+            if self.occupancy_grid.occupancy_map[cx, cy] > 2.0:
+                print("Waypoint em parede recém descoberta → replanando")
+                self.force_replan = True
+                self.planned_path = None
+                return
     
     def control_tp5(self):
-        """
-        Control function for TP5: Frontier exploration with path planning
-        - SLAM with localization
-        - Frontier-based exploration
-        - A* path planning
-        - Path following with lookahead
-        """
         pose = self.odometer_values()
-        
-        self.step_location(pose)  # Update localization and map
-                
-        
-        self.step_replanning()  # Replan path if needed
 
-        
+        self.step_location(pose)
+        self.step_validate_path()
+        self.step_check_progress()   # ← novo
+        self.step_replanning()
         command = self.step_execute_plan()
-        
         self.step_display()
-    
+
         self.counter += 1
         return command
-                
             

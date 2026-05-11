@@ -22,7 +22,6 @@ class Planner:
         self.odom_pose_ref = np.array([0, 0, 0])
 
     def get_neighbors(self, current_cell):
-        """ 8-connected neighbors """
         x, y = current_cell
         neighbors = []
         for dx in [-1, 0, 1]:
@@ -31,8 +30,12 @@ class Planner:
                     continue
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < self.grid.x_max_map and 0 <= ny < self.grid.y_max_map:
-                    # check obstacle
                     if self.map_walls[int(nx), int(ny)] < 0.5:
+                        # Movimento diagonal: verifica os dois cantos adjacentes
+                        if abs(dx) == 1 and abs(dy) == 1:
+                            if (self.map_walls[int(x + dx), int(y)] > 0.5 or
+                                self.map_walls[int(x), int(y + dy)] > 0.5):
+                                continue  # bloqueia diagonal que clipa parede
                         neighbors.append((nx, ny))
         return neighbors
 
@@ -42,7 +45,7 @@ class Planner:
 
     def setup_wall_map(self):
         occ_threshold = 2
-        inflation_kernel_size = 7  # era 15 — muito grande, bloqueava corredores
+        inflation_kernel_size = 16  # era 15 — muito grande, bloqueava corredores
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflation_kernel_size, inflation_kernel_size))
         occ_map_bin = (self.grid.occupancy_map > occ_threshold).astype(np.uint8)
         self.map_walls = cv2.dilate(occ_map_bin, kernel)
@@ -174,3 +177,5 @@ class Planner:
 
         xw, yw = self.grid.conv_map_to_world(best[0], best[1])
         return np.array([xw, yw, 0.0])
+    
+    

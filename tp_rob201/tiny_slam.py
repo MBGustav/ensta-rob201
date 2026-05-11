@@ -197,13 +197,15 @@ class TinySlam:
         return best_score
 
     def _localise_cem(self, lidar, raw_odom_pose):
-        """Cross-Entropy Method optimisation of the odom->map reference pose."""
         raw_odom_pose = np.asarray(raw_odom_pose, dtype=float)
 
         base_ref = np.asarray(self.odom_pose_ref, dtype=float).copy()
         best_delta = np.zeros(3, dtype=float)
         best_pose = self.get_corrected_pose(raw_odom_pose, base_ref)
-        best_score = self.score(lidar, best_pose)
+        
+        # Score inicial — referência para decidir se aplica correção
+        initial_score = self.score(lidar, best_pose)
+        best_score = initial_score
 
         mu = np.zeros(3, dtype=float)
         std = np.asarray(self.localise_std, dtype=float).copy()
@@ -213,7 +215,6 @@ class TinySlam:
 
         for _ in range(int(self.cem_iterations)):
             deltas = np.random.normal(loc=mu, scale=std, size=(k, 3))
-            # Always evaluate current mean and current best
             if k >= 1:
                 deltas[0] = mu
             if k >= 2:
@@ -229,7 +230,6 @@ class TinySlam:
             elite = deltas[elite_idx]
             elite_scores = scores[elite_idx]
 
-            # Keep best seen candidate
             top_i = elite_idx[int(np.argmax(elite_scores))]
             if scores[top_i] > best_score:
                 best_score = scores[top_i]
@@ -241,7 +241,10 @@ class TinySlam:
             std = (1.0 - self.cem_alpha) * std + self.cem_alpha * std_new
             std = np.maximum(std, self.cem_min_std)
 
-        # Apply a bounded update to avoid sudden teleportation when scan matching fails.
+        # Só aplica correção se melhorou pelo menos 5% — evita teleporte
+        if best_score < initial_score * 1.05:
+            return initial_score
+
         applied_delta = np.asarray(best_delta, dtype=float)
         applied_delta[0:2] = np.clip(applied_delta[0:2], -self.max_ref_update[0:2], self.max_ref_update[0:2])
         applied_delta[2] = float(np.clip(applied_delta[2], -self.max_ref_update[2], self.max_ref_update[2]))
@@ -266,66 +269,59 @@ class TinySlam:
         return np.array(points).T
 
     def update_map(self, lidar, pose, goal=None, trajectory=None):
-        """
-        Bayesian map update with new observation
-        lidar : placebot object with lidar data
-        pose : [x, y, theta] nparray, corrected pose in world coordinates
-        goal : [x, y, theta] nparray, current goal in world coordinates
-        trajectory : list of [x, y, theta] nparray, robot trajectory in world coordinates
-        """
         x_ref, y_ref, theta_ref = np.asarray(pose, dtype=float)
-        
-        # 1. Convert lidar data to numpy arrays
+
         lidar_ranges = np.asarray(lidar.get_sensor_values(), dtype=float)
-        ray_angles = np.asarray(lidar.get_ray_angles(), dtype=float)
-        max_range = float(lidar.max_range)
-        
-        # 1.1 Filter out invalid ranges
-        # Keep "no-hit" rays reported at exactly max_range so we can still mark free space.
+        ray_angles   = np.asarray(lidar.get_ray_angles(), dtype=float)
+        max_range    = float(lidar.max_range)
+
         valid_mask = (lidar_ranges > 0.0) & np.isfinite(lidar_ranges) & (lidar_ranges <= max_range)
         if not np.any(valid_mask):
             return
 
         lidar_ranges = lidar_ranges[valid_mask]
-        ray_angles = ray_angles[valid_mask]
+        ray_angles   = ray_angles[valid_mask]
 
-        # Separate "hits" (actual obstacle return) from "no return" (at max range)
+        # --- Filtro de spikes: remove raios muito maiores que os vizinhos ---
+        spike_mask = np.ones(len(lidar_ranges), dtype=bool)
+        for i in range(1, len(lidar_ranges) - 1):
+            neighbors_mean = (lidar_ranges[i-1] + lidar_ranges[i+1]) / 2.0
+            if lidar_ranges[i] > neighbors_mean * 2.0:  # spike: 2x maior que vizinhos
+                spike_mask[i] = False
+        lidar_ranges = lidar_ranges[spike_mask]
+        ray_angles   = ray_angles[spike_mask]
+
         hit_mask = lidar_ranges < max_range
-        
-        
-        # 2. Rays in world frame
+
         angles = ray_angles + theta_ref
         c = np.cos(angles)
         s = np.sin(angles)
 
-        # Used to get rid of unknown cells in front of the robot.
-        # If the lidar range is 100, and the obstacle is at 90, we want to mark free space up to ~80, not all the way to 100.
-        free_end_offset = 2.0 * float(self.grid.resolution)
+        free_end_offset = 4.0 * float(self.grid.resolution)
         free_ranges = np.maximum(lidar_ranges - free_end_offset, 0.0)
-        
-        
+
+        # Limita raios sem retorno a 60% do max_range
+        free_ranges[~hit_mask] = np.minimum(
+            free_ranges[~hit_mask], max_range * 0.6
+        )
+
         x_free = x_ref + free_ranges * c
         y_free = y_ref + free_ranges * s
+        x_occ  = x_ref + lidar_ranges[hit_mask] * c[hit_mask]
+        y_occ  = y_ref + lidar_ranges[hit_mask] * s[hit_mask]
 
-        x_occ = x_ref + lidar_ranges[hit_mask] * c[hit_mask]
-        y_occ = y_ref + lidar_ranges[hit_mask] * s[hit_mask]
-        
+        # Raios com retorno: -0.6 | sem retorno: -0.2 (menos agressivo)
         free_vals = np.where(hit_mask, -0.6, -0.2)
-    
-        # 3. Update occupancy grid (log-odds style increments)
-        # Free space along all rays
+
         for (x1, y1), val in zip(zip(x_free, y_free), free_vals):
             self.grid.add_value_along_line(x_ref, y_ref, float(x1), float(y1), val=val)
 
-        # Occupied only when we really hit something
         if len(x_occ) > 0:
             self.grid.add_map_points(x_occ, y_occ, val=2.0)
-        
-        np.clip(self.grid.occupancy_map, -40, 40, out=self.grid.occupancy_map) # Clip values to [0, 100]
-    
-        # 4. plot for debug
+
+        np.clip(self.grid.occupancy_map, -40, 40, out=self.grid.occupancy_map)
+
         self.grid.display_cv(pose, goal=goal, traj=trajectory)
-    
 
 
     def compute(self):
