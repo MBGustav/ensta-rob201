@@ -20,9 +20,7 @@ class Planner:
 
         # Origin of the odom frame in the map frame
         self.odom_pose_ref = np.array([0, 0, 0])
-        self.visited_frontiers = []
-        self.frontier_revisit_distance = 60.0  # Minimum distance to consider a frontier as "new" (increased to encourage exploration of new areas)
-    
+
     def get_neighbors(self, current_cell):
         """ 8-connected neighbors """
         x, y = current_cell
@@ -42,6 +40,15 @@ class Planner:
         """ Euclidean distance """
         return math.hypot(cell_1[0] - cell_2[0], cell_1[1] - cell_2[1])
 
+    def setup_wall_map(self):
+        occ_threshold = 2
+        inflation_kernel_size = 7  # era 15 — muito grande, bloqueava corredores
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflation_kernel_size, inflation_kernel_size))
+        occ_map_bin = (self.grid.occupancy_map > occ_threshold).astype(np.uint8)
+        self.map_walls = cv2.dilate(occ_map_bin, kernel)
+        cv2.imwrite("inflated_walls.png", self.map_walls * 255)
+        
+        
     def plan(self, start, goal, mu=1.0):
         """
         Compute a path using A*, recompute plan if start or goal change
@@ -49,15 +56,10 @@ class Planner:
         goal : [x, y, theta] nparray, goal pose in world coordinates (theta unused)
         mu : float, weight of the heuristic function (weighted A*)
         """
-        # Threshold map with dilation (inflation) to avoid planning muito perto das paredes
-        occ_threshold = 5  # Ajuste conforme necessário
-        inflation_kernel_size = 25  # Ajuste conforme o tamanho do robô
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflation_kernel_size, inflation_kernel_size))
-        occ_map_bin = (self.grid.occupancy_map > occ_threshold).astype(np.uint8)
-        self.map_walls = cv2.dilate(occ_map_bin, kernel)
+        
         
         # save inflated walls for debug
-        cv2.imwrite("inflated_walls.png", self.map_walls * 255)
+        self.setup_wall_map()
         
         start_cell = self.grid.conv_world_to_map(start[0], start[1])
         goal_cell = self.grid.conv_world_to_map(goal[0], goal[1])
@@ -149,72 +151,26 @@ class Planner:
     def explore_frontiers(self, current_pose):
         grid = self.grid.occupancy_map
 
-        # 1. Free / unknown masks
-        free = grid < -0.01
+        free    = grid < -0.01
         unknown = (grid >= -0.01) & (grid <= 0.1)
 
-        # 2. Frontier detection
         kernel = np.ones((3, 3), np.uint8)
         free_dilated = cv2.dilate(free.astype(np.uint8), kernel)
-        frontiers = unknown & (free_dilated > 0)
+        frontier_mask = unknown & (free_dilated > 0)
 
-        points = np.column_stack(np.where(frontiers))
+        # Garante que map_walls está atualizado antes de filtrar
+        self.setup_wall_map()
+        frontier_mask = frontier_mask & (self.map_walls < 0.5)
+
+        points = np.column_stack(np.where(frontier_mask))
 
         if len(points) == 0:
-            print("DEBUG: No frontier points found")
             return np.array([0., 0., 0.])
 
-        # 3. Robot position
         rx, ry = self.grid.conv_world_to_map(current_pose[0], current_pose[1])
-        robot = np.array([rx, ry])
-
-        # =========================
-        # MEMORY FILTER (NEW)
-        # =========================
-        def is_too_close_to_visited(p):
-            for vp in self.visited_frontiers:
-                if np.linalg.norm(p - vp) < self.frontier_revisit_distance:
-                    return True
-            return False
-
-        # 4. Filter frontiers
-        valid_frontiers = []
-
-        for point in points:
-            dist = np.linalg.norm(point - robot)
-
-            if dist < 5 or dist > 800:
-                continue
-
-            if is_too_close_to_visited(point):
-                continue
-
-            valid_frontiers.append(point)
-
-        # fallback si tout est filtré
-        if len(valid_frontiers) == 0:
-            print("DEBUG: No new frontiers, relaxing memory filter")
-
-            # fallback: autorise anciens frontiers mais pénalise
-            valid_frontiers = points
-
-        valid_frontiers = np.array(valid_frontiers)
-
-        dists = np.linalg.norm(valid_frontiers - robot, axis=1)
-        best_idx = np.argmin(dists)
-        best = valid_frontiers[best_idx]
-
-        # =========================
-        # STORE VISITED FRONTIER
-        # =========================
-        self.visited_frontiers.append(best)
-
-        # limite mémoire (évite explosion RAM)
-        if len(self.visited_frontiers) > 500:
-            self.visited_frontiers = self.visited_frontiers[-500:]
+        robot  = np.array([rx, ry])
+        dists  = np.linalg.norm(points - robot, axis=1)
+        best   = points[np.argmin(dists)]
 
         xw, yw = self.grid.conv_map_to_world(best[0], best[1])
-
-        print(f"DEBUG: selected frontier at dist {dists[best_idx]:.1f}")
-
         return np.array([xw, yw, 0.0])

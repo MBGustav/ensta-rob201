@@ -30,14 +30,14 @@ class TinySlam:
         # ===================
         # CEM parameters 
         # ===================
-        self.cem_population  = 40    # era 20 — cobertura do espaço
+        self.cem_population  = 30    # era 20 — cobertura do espaço
         self.cem_iterations  = 15    # era 10 — tempo para convergir
         self.cem_elite_frac  = 0.15  # era 0.3 → nro. elites (mais seletivo)
         self.cem_alpha       = 0.8   # era 0.4 — converge mais rápido para elites
         self.cem_min_std     = np.array([5.0, 5.0, 0.008], dtype=float)
 
         # Permite correções maiores
-        self.max_ref_update  = np.array([40.0, 40.0, 0.5], dtype=float)  # era [25, 25, 0.35]
+        self.max_ref_update  = np.array([10.0, 10.0, 0.5], dtype=float)  # era [25, 25, 0.35]
         
     @staticmethod
     def _wrap_angle(theta: np.ndarray | float) -> np.ndarray | float:
@@ -309,12 +309,13 @@ class TinySlam:
 
         x_occ = x_ref + lidar_ranges[hit_mask] * c[hit_mask]
         y_occ = y_ref + lidar_ranges[hit_mask] * s[hit_mask]
-            
+        
+        free_vals = np.where(hit_mask, -0.6, -0.2)
     
         # 3. Update occupancy grid (log-odds style increments)
         # Free space along all rays
-        for x1, y1 in zip(x_free, y_free):
-            self.grid.add_value_along_line(x_ref, y_ref, float(x1), float(y1), val=-0.6)
+        for (x1, y1), val in zip(zip(x_free, y_free), free_vals):
+            self.grid.add_value_along_line(x_ref, y_ref, float(x1), float(y1), val=val)
 
         # Occupied only when we really hit something
         if len(x_occ) > 0:

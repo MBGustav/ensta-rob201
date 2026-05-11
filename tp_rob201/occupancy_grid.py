@@ -198,6 +198,7 @@ class OccupancyGrid:
         cv2.imshow("map slam", img_color)
         if VIDEO_OUT:
             self.cv_out.write(img_color)
+        
 
         cv2.waitKey(1)
 

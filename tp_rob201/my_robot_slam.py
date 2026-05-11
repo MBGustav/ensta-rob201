@@ -47,7 +47,13 @@ class MyRobotSlam(RobotAbstract):
         self.corrected_pose = np.array([0, 0, 0])
         self.localisation_score_threshold = 5.0
         self.localisation_warmup_steps = 80
-        self.goal_tolerance = 55.0
+        self.goal_tolerance = 30.0 
+        
+        self.exploration_state = "explore"
+        self.current_goal = np.array([0., 0., 0.])
+        self.planned_path = None
+        self.force_replan = True
+        self.ticks_failed = 0
     def control(self):
         """
         Main control function executed at each time step
@@ -116,83 +122,70 @@ class MyRobotSlam(RobotAbstract):
         except Exception as e:
             print("Mapping error:", e)
 
-    def force_replan(self):
-        """
-        Force replanning at next step, for example in case of localization failure or stuck robot
-        """
         
     def step_replanning(self):
-        """
-        Step function for testing the planner only, with a fixed goal and perfect localization
-        """
-        # Replan when necessary: no path, force replan, or periodically
-        if self.planned_path is None or self.force_replan or self.counter % 300 == 0:
-            if self.exploration_state == 'explore':
-                # Find nearest frontier
-                self.current_goal = self.planner.explore_frontiers(self.corrected_pose)
-                # If no frontier found, switch to return state
-                # Only mark exploration done if frontier is truly [0,0,0] or very close
-                frontier_dist = np.linalg.norm(self.current_goal[:2])
-                if frontier_dist < 6.0:
-                    print("No more reachable frontiers! Exploration finished.")
-                    self.exploration_state = 'return'
-                    self.current_goal = np.array([0., 0., 0.])
-                else:
-                    print(f"Found frontier at distance {frontier_dist:.1f}")
+        if not (
+            self.planned_path is None
+            or self.force_replan
+            or self.counter % 150 == 0  # era 50 — menos replanning
+        ):
+            return
 
-            print(f"[{self.exploration_state}] Planning to: {self.current_goal[:2]}")
-            try:
-                self.planned_path = self.planner.plan(self.corrected_pose, self.current_goal, mu=1.0)
-            except Exception as e:
-                print(f"Planning error: {e}")
-                self.planned_path = None
-            self.force_replan = False
-    
-    def step_warmup(self):
-        
-        # Warmup phase: build initial map
-        if self.counter < 100:
-            command = reactive_obst_avoid(self.lidar())
-            if self.counter % 5 == 0:
-                try:
-                    self.occupancy_grid.display_cv(self.corrected_pose)
-                except:
-                    pass
-            self.counter += 1
-            return command
-    
-    def step_state(self):
-        # Initialize exploration state on first run
-        if getattr(self, 'exploration_state', None) is None:
-            self.exploration_state = 'explore'
+        if self.exploration_state == "explore":
+            frontier_goal = self.planner.explore_frontiers(self.corrected_pose)
+
+            if np.allclose(frontier_goal[:2], [0.0, 0.0], atol=1.0):
+                print("Sem frontier → retornando")
+                self.exploration_state = "return"
+                self.current_goal = np.array([0., 0., 0.])
+            else:
+                # Só atualiza o goal se o frontier mudou bastante
+                dist_to_current_goal = np.linalg.norm(frontier_goal[:2] - self.current_goal[:2])
+                if dist_to_current_goal < 20.0 and not self.force_replan:
+                    return  # frontier quase igual, mantém plano atual
+                
+                self.current_goal = frontier_goal
+                occ_map = self.occupancy_grid.occupancy_map
+                frac_unknown = np.sum((occ_map >= -0.1) & (occ_map <= 0.5)) / occ_map.size
+                print(f"Frontier: {self.current_goal[:2]} (unknown={frac_unknown:.4f})")
+
+        elif self.exploration_state == "return":
             self.current_goal = np.array([0., 0., 0.])
+
+        print(f"[{self.exploration_state}] Planejando para {self.current_goal[:2]}")
+
+        try:
+            self.planned_path = self.planner.plan(
+                self.corrected_pose, self.current_goal, mu=1.0
+            )
+            if not self.planned_path:
+                self.force_replan = True
+                return
+        except Exception as e:
+            print("Erro no planejamento:", e)
             self.planned_path = None
             self.force_replan = True
-            self.ticks_failed = 0
+            return
+
+        self.force_replan = False
+
 
     def step_execute_plan(self):
         if self.planned_path is not None and len(self.planned_path) > 0:
             dist_to_goal = np.linalg.norm(self.corrected_pose[:2] - self.current_goal[:2])
-            
-            # Check if reached goal area
+
             if dist_to_goal < self.goal_tolerance:
-                print(f"Reached goal area: {self.current_goal[:2]}")
                 if self.exploration_state == 'return':
-                    command = {"forward": 0.0, "rotation": 0.0}
-                    print("Exploration complete. Home reached.")
+                    print("Home reached. Stopping.")
+                    return {"forward": 0.0, "rotation": 0.0}
                 else:
                     self.force_replan = True
                     command = reactive_obst_avoid(self.lidar())
             else:
-                # Follow path with enhanced path following control
-                d_pursuit = 35.0
-                dists = [np.linalg.norm(self.corrected_pose[:2] - pt[:2]) for pt in self.planned_path]
-                closest_idx = int(np.argmin(dists))
-                
                 try:
-                    # Use new path following control with lateral force
-                    command = path_following_control(self.lidar(), self.corrected_pose, self.planned_path, lidar_weight=0.25)
-                    # Detect stuck robot
+                    command = path_following_control(
+                        self.lidar(), self.corrected_pose, self.planned_path, lidar_weight=0.25
+                    )
                     if command['forward'] < 0.1 and abs(command['rotation']) < 0.1:
                         self.ticks_failed += 1
                         if self.ticks_failed > 20:
@@ -204,10 +197,9 @@ class MyRobotSlam(RobotAbstract):
                     print(f"Control error: {e}")
                     command = {"forward": 0.0, "rotation": 0.0}
         else:
-            # No valid path, fallback to obstacle avoidance
             command = reactive_obst_avoid(self.lidar())
             self.force_replan = True
-        
+
         return command
     
     
@@ -222,7 +214,7 @@ class MyRobotSlam(RobotAbstract):
             except Exception as e:
                 print(f"Display error: {e}")
 
-
+    
     
     def control_tp5(self):
         """
@@ -236,11 +228,9 @@ class MyRobotSlam(RobotAbstract):
         
         self.step_location(pose)  # Update localization and map
                 
-        self.step_state()  # Initialize state if first run
         
         self.step_replanning()  # Replan path if needed
 
-        self.step_warmup()
         
         command = self.step_execute_plan()
         
