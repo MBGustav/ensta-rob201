@@ -24,19 +24,20 @@ class Planner:
     def get_neighbors(self, current_cell):
         x, y = current_cell
         neighbors = []
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.grid.x_max_map and 0 <= ny < self.grid.y_max_map:
-                    if self.map_walls[int(nx), int(ny)] < 0.5:
-                        # Movimento diagonal: verifica os dois cantos adjacentes
-                        if abs(dx) == 1 and abs(dy) == 1:
-                            if (self.map_walls[int(x + dx), int(y)] > 0.5 or
-                                self.map_walls[int(x), int(y + dy)] > 0.5):
-                                continue  # bloqueia diagonal que clipa parede
-                        neighbors.append((nx, ny))
+        directions = [  # (dx, dy)
+            (-1, -1), (-1, 0), (-1, 1),
+            ( 0, -1),          ( 0, 1),
+            ( 1, -1), ( 1, 0), ( 1, 1)
+        ]
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.grid.x_max_map and 0 <= ny < self.grid.y_max_map:
+                if self.map_walls[nx, ny] < 0.5:
+                    # For diagonal moves, ensure both adjacent sides are free (no corner cutting)
+                    if abs(dx) == 1 and abs(dy) == 1:
+                        if self.map_walls[x + dx, y] > 0.5 or self.map_walls[x, y + dy] > 0.5:
+                            continue
+                    neighbors.append((nx, ny))
         return neighbors
 
     def heuristic(self, cell_1, cell_2):
